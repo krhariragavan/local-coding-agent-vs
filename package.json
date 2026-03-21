@@ -1,0 +1,119 @@
+{
+  "name": "local-coding-agent",
+  "displayName": "Local Coding Agent",
+  "description": "AI coding assistant powered by a local Ollama model (Qwen3.5-9B)",
+  "version": "0.1.0",
+  "publisher": "krhariragavan",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "AI",
+    "Programming Languages",
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "localCodingAgent.downloadModel",
+        "title": "Local Coding Agent: Download / Pull Model"
+      },
+      {
+        "command": "localCodingAgent.openChat",
+        "title": "Local Coding Agent: Open Chat"
+      },
+      {
+        "command": "localCodingAgent.openModels",
+        "title": "Local Coding Agent: Open Models Panel"
+      },
+      {
+        "command": "localCodingAgent.explainCode",
+        "title": "Local Coding Agent: Explain Code"
+      },
+      {
+        "command": "localCodingAgent.fixCode",
+        "title": "Local Coding Agent: Fix Code"
+      },
+      {
+        "command": "localCodingAgent.refactorCode",
+        "title": "Local Coding Agent: Refactor Code"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "localCodingAgent",
+          "title": "Local Coding Agent",
+          "icon": "media/robot.svg"
+        }
+      ]
+    },
+    "views": {
+      "localCodingAgent": [
+        {
+          "type": "webview",
+          "id": "localCodingAgent.chatView",
+          "name": "Chat"
+        }
+      ]
+    },
+    "menus": {
+      "editor/context": [
+        {
+          "command": "localCodingAgent.explainCode",
+          "when": "editorHasSelection",
+          "group": "localCodingAgent@1"
+        },
+        {
+          "command": "localCodingAgent.fixCode",
+          "when": "editorHasSelection",
+          "group": "localCodingAgent@2"
+        },
+        {
+          "command": "localCodingAgent.refactorCode",
+          "when": "editorHasSelection",
+          "group": "localCodingAgent@3"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Local Coding Agent",
+      "properties": {
+        "localCodingAgent.ollamaUrl": {
+          "type": "string",
+          "default": "http://localhost:11434",
+          "description": "Base URL for the Ollama server"
+        },
+        "localCodingAgent.modelName": {
+          "type": "string",
+          "default": "hf.co/Jackrong/Qwen3.5-9B-Claude-4.6-Opus-Reasoning-Distilled-v2-GGUF",
+          "description": "Ollama model name to use (supports hf.co/ HuggingFace models)"
+        },
+        "localCodingAgent.enableInlineCompletions": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable inline ghost-text completions (may be slow on large models)"
+        },
+        "localCodingAgent.completionTimeoutMs": {
+          "type": "number",
+          "default": 10000,
+          "description": "Max milliseconds to wait for an inline completion"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.3.0"
+  }
+}
