@@ -2,8 +2,12 @@
   "name": "local-coding-agent",
   "displayName": "Local Coding Agent",
   "description": "AI coding assistant powered by a local Ollama model (Qwen3.5-9B)",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "publisher": "krhariragavan",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/krhariragavan/local-coding-agent-vs"
+  },
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -56,6 +60,11 @@
       "localCodingAgent": [
         {
           "type": "webview",
+          "id": "localCodingAgent.modelsView",
+          "name": "Models"
+        },
+        {
+          "type": "webview",
           "id": "localCodingAgent.chatView",
           "name": "Chat"
         }
@@ -90,8 +99,14 @@
         },
         "localCodingAgent.modelName": {
           "type": "string",
-          "default": "hf.co/Jackrong/Qwen3.5-9B-Claude-4.6-Opus-Reasoning-Distilled-v2-GGUF",
-          "description": "Ollama model name to use (supports hf.co/ HuggingFace models)"
+          "default": "qwen2.5-coder:7b",
+          "description": "Active Ollama model name. Changed automatically when you click 'Use' in the Models panel."
+        },
+        "localCodingAgent.customModels": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Custom model IDs added via the Models panel (e.g. hf.co/username/repo:Q4_K_M)"
         },
         "localCodingAgent.enableInlineCompletions": {
           "type": "boolean",

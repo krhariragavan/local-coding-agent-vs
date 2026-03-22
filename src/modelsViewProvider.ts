@@ -7,7 +7,7 @@ function getNonce(): string {
   return Array.from({ length: 32 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
 }
 
-export class ModelsViewProvider implements vscode.WebviewViewProvider {
+export class ModelsViewProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   public static readonly viewType = 'localCodingAgent.modelsView';
 
   private _view?: vscode.WebviewView;
@@ -18,6 +18,11 @@ export class ModelsViewProvider implements vscode.WebviewViewProvider {
 
   private readonly _onUseModelRequest = new vscode.EventEmitter<string>();
   public readonly onUseModelRequest = this._onUseModelRequest.event;
+
+  private readonly _onCustomModelAdded = new vscode.EventEmitter<string>();
+  public readonly onCustomModelAdded = this._onCustomModelAdded.event;
+
+  private customModels: string[] = [];
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -45,12 +50,16 @@ export class ModelsViewProvider implements vscode.WebviewViewProvider {
       switch (msg.type) {
         case 'ready':
           this.refreshInstalled();
+          this._view?.webview.postMessage({ type: 'setCustomModels', customModels: this.customModels });
           break;
         case 'downloadModel':
           if (msg.modelId) this._onDownloadRequest.fire(msg.modelId);
           break;
         case 'useModel':
           if (msg.modelId) this._onUseModelRequest.fire(msg.modelId);
+          break;
+        case 'openAddModelDialog':
+          this.promptAddModel();
           break;
       }
     });
@@ -64,14 +73,21 @@ export class ModelsViewProvider implements vscode.WebviewViewProvider {
     try {
       const models = await this.client.listModels();
       const installed = models.map((m) => m.name.toLowerCase());
-      this._view?.webview.postMessage({
-        type: 'updateInstalled',
-        installed,
-        activeModel: this.activeModel
-      });
+      this.pushInstalled(installed, this.activeModel);
     } catch {
-      this._view?.webview.postMessage({ type: 'ollamaOffline' });
+      this.pushOffline();
     }
+  }
+
+  /** Push installed-model state directly (called by extension after its own listModels call). */
+  pushInstalled(installed: string[], activeModel: string): void {
+    this.activeModel = activeModel;
+    this._view?.webview.postMessage({ type: 'updateInstalled', installed, activeModel });
+  }
+
+  /** Notify the models panel that Ollama is offline. */
+  pushOffline(): void {
+    this._view?.webview.postMessage({ type: 'ollamaOffline' });
   }
 
   notifyDownloadProgress(modelId: string, status: string, percent: number, downloaded: string, total: string): void {
@@ -88,9 +104,37 @@ export class ModelsViewProvider implements vscode.WebviewViewProvider {
     this._view?.webview.postMessage({ type: 'setActive', modelId });
   }
 
+  private async promptAddModel(): Promise<void> {
+    const input = await vscode.window.showInputBox({
+      title: 'Add HuggingFace Model',
+      prompt: 'Enter the HuggingFace model path or URL',
+      placeHolder: 'e.g. hf.co/bartowski/Llama-3.2-3B-Instruct-GGUF:Q4_K_M',
+      ignoreFocusOut: true,
+      validateInput: (v) => v.trim().length === 0 ? 'Model ID cannot be empty' : undefined
+    });
+
+    if (!input) return;
+
+    // Normalize URL → hf.co/username/repo format
+    let modelId = input.trim();
+    modelId = modelId.replace(/^https?:\/\/huggingface\.co\//i, 'hf.co/');
+    if (!modelId.startsWith('hf.co/') && !modelId.includes('://') && modelId.includes('/') && modelId.split('/').length === 2) {
+      modelId = 'hf.co/' + modelId;
+    }
+
+    this._onCustomModelAdded.fire(modelId);
+    this._onDownloadRequest.fire(modelId);
+  }
+
+  setCustomModels(ids: string[]): void {
+    this.customModels = ids;
+    this._view?.webview.postMessage({ type: 'setCustomModels', customModels: ids });
+  }
+
   dispose(): void {
     this._onDownloadRequest.dispose();
     this._onUseModelRequest.dispose();
+    this._onCustomModelAdded.dispose();
   }
 
   private buildHtml(): string {
@@ -115,6 +159,7 @@ export class ModelsViewProvider implements vscode.WebviewViewProvider {
       font-size: var(--vscode-font-size, 13px);
       line-height: 1.5;
       overflow-x: hidden;
+      overflow-y: auto;
     }
 
     /* ── Search bar ── */
@@ -152,6 +197,34 @@ export class ModelsViewProvider implements vscode.WebviewViewProvider {
       font-size: 14px;
       padding: 0 2px;
       display: none;
+    }
+
+    /* ── Add custom model button ── */
+    #add-section {
+      padding: 5px 10px 6px;
+      border-bottom: 1px solid var(--vscode-panel-border, #3c3c3c);
+    }
+    #add-toggle {
+      background: none;
+      border: none;
+      color: var(--vscode-descriptionForeground, #9a9a9a);
+      cursor: pointer;
+      font-size: 12px;
+      font-family: inherit;
+      padding: 2px 0;
+      text-align: left;
+    }
+    #add-toggle:hover { color: var(--vscode-foreground, #ccc); }
+
+    /* ── Non-catalog installed models section ── */
+    #custom-installed { display: none; }
+    .section-label {
+      font-size: 10px;
+      font-weight: 600;
+      color: var(--vscode-descriptionForeground, #888);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      padding: 8px 12px 4px;
     }
 
     /* ── Offline banner ── */
@@ -309,6 +382,19 @@ export class ModelsViewProvider implements vscode.WebviewViewProvider {
     <button id="search-clear" title="Clear">✕</button>
   </div>
 
+  <!-- Add custom / HuggingFace model -->
+  <div id="add-section">
+    <button id="add-toggle">＋ Add HuggingFace model</button>
+  </div>
+
+  <!-- Installed models not in the catalog -->
+  <div id="custom-installed">
+    <div class="section-label">Installed (custom)</div>
+    <div id="custom-installed-list"></div>
+  </div>
+
+  <!-- Catalog -->
+  <div class="section-label" style="padding-top:10px">Catalog</div>
   <div id="model-list"></div>
   <div id="empty">No models match your search.</div>
 
@@ -316,15 +402,65 @@ export class ModelsViewProvider implements vscode.WebviewViewProvider {
     const vscode = acquireVsCodeApi();
     const CATALOG = ${catalogJson};
 
-    const $list    = document.getElementById('model-list');
-    const $search  = document.getElementById('search');
-    const $clear   = document.getElementById('search-clear');
-    const $empty   = document.getElementById('empty');
-    const $offline = document.getElementById('offline-banner');
+    const $list              = document.getElementById('model-list');
+    const $search            = document.getElementById('search');
+    const $clear             = document.getElementById('search-clear');
+    const $empty             = document.getElementById('empty');
+    const $offline           = document.getElementById('offline-banner');
+    const $addToggle         = document.getElementById('add-toggle');
+    const $customInstalled   = document.getElementById('custom-installed');
+    const $customInstalledList = document.getElementById('custom-installed-list');
 
-    let installed   = [];   // lowercase model names from Ollama
-    let activeModel = '';
-    let downloading = null; // modelId currently downloading
+    let installed    = [];   // lowercase model names from Ollama
+    let activeModel  = '';
+    let downloading  = null; // modelId currently downloading
+    let customModels = [];   // persisted custom model IDs
+
+    // ── Add custom model — delegate to VS Code InputBox ──
+    $addToggle.addEventListener('click', () => {
+      vscode.postMessage({ type: 'openAddModelDialog' });
+    });
+
+    // ── Non-catalog installed models section ──
+    function refreshCustomInstalledSection() {
+      const catalogIds = new Set(CATALOG.map(m => m.id.toLowerCase()));
+      const nonCatalog = installed.filter(n => {
+        const base = n.split(':')[0];
+        return !CATALOG.some(m => {
+          const cb = m.id.split(':')[0].toLowerCase();
+          return n === m.id.toLowerCase() || base === cb;
+        });
+      });
+
+      $customInstalledList.innerHTML = '';
+      nonCatalog.forEach(modelId => {
+        const card = document.createElement('div');
+        card.className = 'model-card' + (installed.some(n => n === modelId.toLowerCase()) ? ' installed' : '');
+        card.dataset.id = modelId;
+
+        const isActive = modelId === activeModel;
+        const anyDl = downloading !== null;
+
+        card.innerHTML =
+          '<div class="card-top">' +
+            '<div class="model-name"><div class="installed-dot"></div>' + esc(modelId) + '</div>' +
+          '</div>' +
+          '<div class="card-actions"></div>';
+
+        const actions = card.querySelector('.card-actions');
+        if (isActive) {
+          actions.innerHTML = '<span class="active-badge">✓ Active</span>';
+        } else {
+          const useBtn = btn('Use', 'btn btn-primary', anyDl);
+          useBtn.addEventListener('click', () => vscode.postMessage({ type: 'useModel', modelId }));
+          actions.appendChild(useBtn);
+        }
+
+        $customInstalledList.appendChild(card);
+      });
+
+      $customInstalled.style.display = nonCatalog.length > 0 ? 'block' : 'none';
+    }
 
     // ── Build DOM for all cards once ──
     function buildCards() {
@@ -432,11 +568,17 @@ export class ModelsViewProvider implements vscode.WebviewViewProvider {
           activeModel = data.activeModel;
           $offline.style.display = 'none';
           refreshCards();
+          refreshCustomInstalledSection();
           break;
 
         case 'setActive':
           activeModel = data.modelId;
           refreshCards();
+          refreshCustomInstalledSection();
+          break;
+
+        case 'setCustomModels':
+          customModels = data.customModels || [];
           break;
 
         case 'ollamaOffline':
@@ -466,6 +608,7 @@ export class ModelsViewProvider implements vscode.WebviewViewProvider {
           }
           downloading = null;
           refreshCards();
+          refreshCustomInstalledSection();
           break;
         }
       }

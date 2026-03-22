@@ -80,6 +80,15 @@ export class ModelManager implements vscode.Disposable {
       vscode.window.showWarningMessage('A model is already downloading. Please wait.');
       return false;
     }
+
+    // Warn instead of silently re-downloading an already installed model
+    if (await this.isModelAvailable(targetModel)) {
+      vscode.window.showWarningMessage(
+        `Model "${this.shortName(targetModel)}" is already downloaded. No re-download needed.`
+      );
+      return true;
+    }
+
     this.downloading = true;
 
     return vscode.window.withProgress(

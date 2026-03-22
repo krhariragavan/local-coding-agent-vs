@@ -1,23 +1,22 @@
 import * as vscode from 'vscode';
 import { OllamaClient, ChatMessage } from './ollamaClient';
-import { CATALOG_MODELS } from './modelCatalog';
 
 function getNonce(): string {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
   return Array.from({ length: 32 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
 }
 
-export class ChatViewProvider implements vscode.WebviewViewProvider {
+export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   public static readonly viewType = 'localCodingAgent.chatView';
 
   private _view?: vscode.WebviewView;
   private history: ChatMessage[] = [];
 
-  private readonly _onDownloadRequest = new vscode.EventEmitter<string>();
-  public readonly onDownloadRequest = this._onDownloadRequest.event;
+  private readonly _onViewReady = new vscode.EventEmitter<void>();
+  public readonly onViewReady = this._onViewReady.event;
 
-  private readonly _onUseModelRequest = new vscode.EventEmitter<string>();
-  public readonly onUseModelRequest = this._onUseModelRequest.event;
+  private readonly _onSwitchModelRequest = new vscode.EventEmitter<string>();
+  public readonly onSwitchModelRequest = this._onSwitchModelRequest.event;
 
   private readonly systemPrompt = `You are an expert AI coding assistant embedded in VS Code. Your role:
 - Help write, debug, explain, and improve code
@@ -32,23 +31,21 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     private modelName: string
   ) {}
 
-  // ── Called by extension after Ollama responds ──
-  setInstalledModels(installed: string[], activeModel: string): void {
-    this._view?.webview.postMessage({ type: 'updateModels', installed, activeModel });
-  }
-
   setModel(name: string): void {
     this.modelName = name;
     const short = this.toShort(name);
     this._view?.webview.postMessage({ type: 'modelChanged', modelId: name, short });
   }
 
-  notifyDownloadProgress(modelId: string, status: string, percent: number, downloaded: string, total: string): void {
-    this._view?.webview.postMessage({ type: 'downloadProgress', modelId, status, percent, downloaded, total });
+  /** Push the list of installed model names so the chat toolbar dropdown stays in sync. */
+  notifyInstalledModels(models: string[]): void {
+    this._view?.webview.postMessage({ type: 'installedModels', models });
   }
 
-  notifyDownloadDone(success: boolean): void {
-    this._view?.webview.postMessage({ type: 'downloadDone', success });
+  /** Update the status dot: green = model ready, yellow = online but model missing, red = offline. */
+  notifyStatus(ollamaOnline: boolean, modelReady: boolean): void {
+    const dotState = !ollamaOnline ? 'offline' : modelReady ? 'ready' : 'missing';
+    this._view?.webview.postMessage({ type: 'statusUpdate', dotState });
   }
 
   resolveWebviewView(
@@ -65,6 +62,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     webviewView.webview.html = this.buildHtml();
 
+    this._onViewReady.fire();
+
     webviewView.webview.onDidReceiveMessage(async (msg: {
       type: string; text?: string; includeContext?: boolean; modelId?: string;
     }) => {
@@ -76,11 +75,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           this.history = [];
           this._view?.webview.postMessage({ type: 'clearMessages' });
           break;
-        case 'downloadModel':
-          if (msg.modelId) this._onDownloadRequest.fire(msg.modelId);
-          break;
-        case 'useModel':
-          if (msg.modelId) this._onUseModelRequest.fire(msg.modelId);
+        case 'switchModel':
+          if (msg.modelId) this._onSwitchModelRequest.fire(msg.modelId);
           break;
       }
     });
@@ -98,8 +94,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   dispose(): void {
-    this._onDownloadRequest.dispose();
-    this._onUseModelRequest.dispose();
+    this._onViewReady.dispose();
+    this._onSwitchModelRequest.dispose();
   }
 
   private async handleUserMessage(userText: string, includeContext: boolean): Promise<void> {
@@ -132,7 +128,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.history.push({ role: 'assistant', content: fullResponse });
       this._view?.webview.postMessage({ type: 'finalizeMessage' });
     } catch (err) {
-      this._view?.webview.postMessage({ type: 'error', content: String(err) });
+      const msg = String(err);
+      const friendly = (msg.includes('not found') || msg.includes('404'))
+        ? 'Model not found in Ollama. Open the **Models** panel and download a model first.'
+        : `Error: ${msg}`;
+      this._view?.webview.postMessage({ type: 'error', content: friendly });
     }
   }
 
@@ -144,7 +144,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private buildHtml(): string {
     const nonce      = getNonce();
     const shortModel = this.toShort(this.modelName);
-    const catalogJson = JSON.stringify(CATALOG_MODELS);
 
     return /* html */`<!DOCTYPE html>
 <html lang="en">
@@ -162,7 +161,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       flex-direction: column;
       height: 100vh;
       overflow: hidden;
-      position: relative;
       background: var(--vscode-sideBar-background, #252526);
       color: var(--vscode-foreground, #ccc);
       font-family: var(--vscode-font-family, -apple-system, 'Segoe UI', sans-serif);
@@ -180,128 +178,61 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       flex-shrink: 0;
       gap: 6px;
     }
-    #model-btn {
+    #active-model {
       display: flex;
       align-items: center;
       gap: 5px;
-      background: none;
-      border: 1px solid transparent;
-      color: var(--vscode-foreground, #ccc);
-      cursor: pointer;
-      padding: 2px 6px;
-      border-radius: 3px;
-      font-size: 12px;
-      font-family: inherit;
       flex: 1;
       min-width: 0;
-      text-align: left;
     }
-    #model-btn:hover { background: var(--vscode-toolbar-hoverBackground, #2a2d2e); border-color: var(--vscode-panel-border, #3c3c3c); }
-    #model-btn.open { background: var(--vscode-list-hoverBackground, #2a2d2e); border-color: var(--vscode-focusBorder, #007fd4); }
     #status-dot {
-      width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
-      background: #555; /* default: unknown */
-    }
-    #status-dot.ready     { background: #4ec94e; }
-    #status-dot.offline   { background: #f44747; }
-    #status-dot.missing   { background: #cca700; }
-    #model-name-label {
-      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1;
-    }
-    .chevron { font-size: 9px; flex-shrink: 0; color: var(--vscode-descriptionForeground, #888); }
-    #clear-btn {
-      background: none; border: 1px solid transparent;
-      color: var(--vscode-descriptionForeground, #888);
-      cursor: pointer; padding: 2px 8px; font-size: 11px; border-radius: 3px;
-      font-family: inherit; flex-shrink: 0;
-    }
-    #clear-btn:hover { background: var(--vscode-toolbar-hoverBackground, #2a2d2e); border-color: var(--vscode-panel-border, #3c3c3c); }
-
-    /* ── Model picker panel (collapses under toolbar) ── */
-    #picker {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
       flex-shrink: 0;
-      max-height: 0;
-      overflow: hidden;
-      transition: max-height 0.18s ease;
-      border-bottom: 1px solid transparent;
+      background: #555;
     }
-    #picker.open {
-      max-height: 270px;
-      overflow-y: auto;
-      border-bottom-color: var(--vscode-panel-border, #3c3c3c);
-    }
-    #picker-search-row {
-      padding: 6px 8px;
-      position: sticky;
-      top: 0;
-      background: var(--vscode-sideBar-background, #252526);
-      border-bottom: 1px solid var(--vscode-panel-border, #2a2a2a);
-      z-index: 5;
-    }
-    #picker-search {
-      width: 100%;
-      background: var(--vscode-input-background, #3c3c3c);
-      color: var(--vscode-input-foreground, #ccc);
-      border: 1px solid var(--vscode-input-border, #3c3c3c);
-      border-radius: 3px;
-      padding: 4px 8px;
-      font-size: 12px; font-family: inherit;
-      outline: none;
-    }
-    #picker-search:focus { border-color: var(--vscode-focusBorder, #007fd4); }
-    #picker-search::placeholder { color: var(--vscode-input-placeholderForeground, #666); }
-
-    .section-label {
-      padding: 5px 10px 3px;
-      font-size: 10px;
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 0.06em;
-      color: var(--vscode-descriptionForeground, #888);
-      background: var(--vscode-sideBar-background, #252526);
-      position: sticky;
-      top: 33px;
-    }
-
-    .picker-item {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      padding: 5px 10px;
-      cursor: default;
-    }
-    .picker-item:hover { background: var(--vscode-list-hoverBackground, #2a2d2e); }
-    .item-dot {
-      width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
-    }
-    .item-dot.installed { background: #4ec94e; }
-    .item-dot.available { background: #555; }
-    .item-name { flex: 1; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .item-size { font-size: 11px; color: var(--vscode-descriptionForeground, #888); flex-shrink: 0; white-space: nowrap; }
-    .active-badge { font-size: 11px; color: #4ec94e; flex-shrink: 0; white-space: nowrap; }
-    .item-btn {
-      font-size: 11px; padding: 2px 8px;
-      border: none; border-radius: 3px; cursor: pointer;
-      flex-shrink: 0; font-family: inherit;
-    }
-    .item-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-    .use-btn  { background: var(--vscode-button-secondaryBackground, #3a3d41); color: var(--vscode-button-secondaryForeground, #ccc); }
-    .use-btn:hover:not(:disabled)  { background: var(--vscode-button-secondaryHoverBackground, #45494e); }
-    .get-btn  { background: var(--vscode-button-background, #0e639c); color: var(--vscode-button-foreground, #fff); }
-    .get-btn:hover:not(:disabled)  { background: var(--vscode-button-hoverBackground, #1177bb); }
-    .dl-pct-badge { font-size: 11px; color: #3794ff; flex-shrink: 0; white-space: nowrap; }
-
-    #picker-empty {
-      padding: 12px 10px;
+    #status-dot.ready   { background: #4ec94e; }
+    #status-dot.missing { background: #cca700; }
+    #status-dot.offline { background: #f44747; }
+    #model-select {
       font-size: 12px;
+      background: transparent;
+      color: var(--vscode-descriptionForeground, #9d9d9d);
+      border: none;
+      outline: none;
+      cursor: pointer;
+      flex: 1;
+      min-width: 0;
+      font-family: inherit;
+      max-width: 200px;
+    }
+    #model-select:focus { outline: none; }
+    #model-select option {
+      background: var(--vscode-dropdown-background, #252526);
+      color: var(--vscode-foreground, #ccc);
+    }
+    #clear-btn {
+      background: none;
+      border: 1px solid transparent;
       color: var(--vscode-descriptionForeground, #888);
-      text-align: center;
-      display: none;
+      cursor: pointer;
+      padding: 2px 8px;
+      font-size: 11px;
+      border-radius: 3px;
+      font-family: inherit;
+      flex-shrink: 0;
+    }
+    #clear-btn:hover {
+      background: var(--vscode-toolbar-hoverBackground, #2a2d2e);
+      border-color: var(--vscode-panel-border, #3c3c3c);
     }
 
     /* ── Messages ── */
     #messages {
-      flex: 1; overflow-y: auto; padding: 4px 0 8px;
+      flex: 1;
+      overflow-y: auto;
+      padding: 4px 0 8px;
     }
     .message { padding: 8px 12px; }
     .message + .message { border-top: 1px solid var(--vscode-panel-border, #2a2a2a); }
@@ -309,7 +240,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     .role-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
     .message.user .role-dot      { background: #3794ff; }
     .message.assistant .role-dot { background: #4ec94e; }
-    .msg-label { font-size: 11px; font-weight: 600; color: var(--vscode-descriptionForeground, #9d9d9d); text-transform: uppercase; letter-spacing: 0.04em; }
+    .msg-label {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--vscode-descriptionForeground, #9d9d9d);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
     .msg-body { word-break: break-word; }
 
     /* ── Code blocks ── */
@@ -337,25 +274,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     #send-btn:disabled { opacity: 0.45; cursor: not-allowed; }
     .hint { font-size: 10px; color: var(--vscode-descriptionForeground, #666); margin-top: 4px; text-align: right; }
 
-    /* ── Download overlay ── */
-    #dl-overlay {
-      position: absolute; inset: 0; z-index: 200;
-      background: rgba(14, 14, 14, 0.85);
-      backdrop-filter: blur(3px);
-      display: flex; flex-direction: column; align-items: center; justify-content: center;
-      gap: 14px; padding: 24px; text-align: center;
-    }
-    #dl-overlay.hidden { display: none; }
-    #dl-icon { font-size: 30px; animation: bounce 1.2s ease-in-out infinite; }
-    @keyframes bounce { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-6px)} }
-    #dl-title { font-size: 13px; font-weight: 600; }
-    #dl-model { font-size: 11px; color: var(--vscode-descriptionForeground, #888); word-break: break-all; max-width: 100%; }
-    #dl-bar-wrap { width: 100%; max-width: 280px; }
-    #dl-bar { height: 5px; background: var(--vscode-progressBar-background, #333); border-radius: 3px; overflow: hidden; margin-bottom: 6px; }
-    #dl-fill { height: 100%; width: 0%; background: linear-gradient(90deg,#0e639c,#3794ff); border-radius: 3px; transition: width 0.25s ease; }
-    #dl-stats { display: flex; justify-content: space-between; font-size: 11px; color: var(--vscode-descriptionForeground, #888); }
-    #dl-status-text { font-size: 11px; color: var(--vscode-descriptionForeground, #777); font-style: italic; }
-
     /* ── Scrollbar ── */
     ::-webkit-scrollbar { width: 5px; }
     ::-webkit-scrollbar-track { background: transparent; }
@@ -364,35 +282,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   </style>
 </head>
 <body>
-  <!-- Download overlay -->
-  <div id="dl-overlay" class="hidden">
-    <div id="dl-icon">⬇</div>
-    <div id="dl-title">Downloading model…</div>
-    <div id="dl-model"></div>
-    <div id="dl-bar-wrap">
-      <div id="dl-bar"><div id="dl-fill"></div></div>
-      <div id="dl-stats"><span id="dl-bytes"></span><span id="dl-pct">0%</span></div>
-    </div>
-    <div id="dl-status-text"></div>
-  </div>
-
   <!-- Toolbar -->
   <div id="toolbar">
-    <button id="model-btn" title="Select or download a model">
+    <div id="active-model">
       <span id="status-dot"></span>
-      <span id="model-name-label">${shortModel}</span>
-      <span class="chevron">▾</span>
-    </button>
-    <button id="clear-btn">Clear</button>
-  </div>
-
-  <!-- Model picker (hidden until model-btn is clicked) -->
-  <div id="picker">
-    <div id="picker-search-row">
-      <input id="picker-search" type="text" placeholder="Search models…" autocomplete="off" spellcheck="false">
+      <select id="model-select" title="Switch active model">
+        <option value="${this.modelName}">${shortModel}</option>
+      </select>
     </div>
-    <div id="picker-list"></div>
-    <div id="picker-empty">No models match your search.</div>
+    <button id="clear-btn">Clear</button>
   </div>
 
   <!-- Chat messages -->
@@ -418,268 +316,219 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   </div>
 
   <script nonce="${nonce}">
-    const vscode      = acquireVsCodeApi();
-    const CATALOG     = ${catalogJson};
-    const $messages   = document.getElementById('messages');
-    const $input      = document.getElementById('input');
-    const $sendBtn    = document.getElementById('send-btn');
-    const $clearBtn   = document.getElementById('clear-btn');
-    const $includeCtx = document.getElementById('include-ctx');
-    const $modelBtn   = document.getElementById('model-btn');
-    const $picker     = document.getElementById('picker');
-    const $pickerSrch = document.getElementById('picker-search');
-    const $pickerList = document.getElementById('picker-list');
-    const $pickerEmpty= document.getElementById('picker-empty');
-    const $statusDot  = document.getElementById('status-dot');
-    const $modelLabel = document.getElementById('model-name-label');
+    const vscode       = acquireVsCodeApi();
+    const $messages    = document.getElementById('messages');
+    const $input       = document.getElementById('input');
+    const $sendBtn     = document.getElementById('send-btn');
+    const $includeCtx  = document.getElementById('include-ctx');
+    const $statusDot   = document.getElementById('status-dot');
+    const $modelSelect = document.getElementById('model-select');
 
-    let streaming      = false;
-    let streamText     = '';
-    let $streamEl      = null;
-    let installed      = [];   // lowercase names from Ollama
-    let activeModelId  = '${this.modelName}';
-    let currentDl      = null; // model id being downloaded
-    let dlPercent      = 0;
+    let currentModelId = $modelSelect.value;
 
-    // ── Picker open / close ──
-    function openPicker() {
-      $picker.classList.add('open');
-      $modelBtn.classList.add('open');
-      $pickerSrch.value = '';
-      buildPickerList();
-      $pickerSrch.focus();
-    }
-    function closePicker() {
-      $picker.classList.remove('open');
-      $modelBtn.classList.remove('open');
-    }
-    $modelBtn.addEventListener('click', () => $picker.classList.contains('open') ? closePicker() : openPicker());
-    document.addEventListener('click', e => {
-      if (!$picker.contains(e.target) && !$modelBtn.contains(e.target)) closePicker();
+    $modelSelect.addEventListener('change', () => {
+      const selected = $modelSelect.value;
+      if (selected && selected !== currentModelId) {
+        currentModelId = selected;
+        vscode.postMessage({ type: 'switchModel', modelId: selected });
+      }
     });
-    $pickerSrch.addEventListener('input', buildPickerList);
 
-    // ── Build picker list ──
-    function buildPickerList() {
-      const q = $pickerSrch.value.toLowerCase().trim();
-      const filtered = CATALOG.filter(m =>
-        !q ||
-        m.name.toLowerCase().includes(q) ||
-        m.description.toLowerCase().includes(q) ||
-        m.tags.some(t => t.toLowerCase().includes(q))
-      );
+    let streaming   = false;
+    let streamText  = '';
+    let $streamEl   = null;
 
-      const instList  = filtered.filter(m => isInstalled(m.id));
-      const availList = filtered.filter(m => !isInstalled(m.id));
-      const anyDl     = currentDl !== null;
-      let html = '';
+    // ── Auto-resize textarea ──
+    $input.addEventListener('input', () => {
+      $input.style.height = 'auto';
+      $input.style.height = Math.min($input.scrollHeight, 120) + 'px';
+    });
 
-      if (instList.length) {
-        html += '<div class="section-label">Installed</div>';
-        instList.forEach(m => { html += buildItem(m, true, anyDl); });
+    // ── Send on Ctrl+Enter ──
+    $input.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        send();
       }
-      if (availList.length) {
-        html += '<div class="section-label">Available</div>';
-        availList.forEach(m => { html += buildItem(m, false, anyDl); });
-      }
+    });
 
-      const empty = !instList.length && !availList.length;
-      $pickerEmpty.style.display = empty ? 'block' : 'none';
-      $pickerList.innerHTML = html;
+    $sendBtn.addEventListener('click', send);
+    document.getElementById('clear-btn').addEventListener('click', () => {
+      vscode.postMessage({ type: 'clearChat' });
+    });
 
-      // Attach button listeners after render
-      $pickerList.querySelectorAll('.use-btn').forEach(btn => {
-        btn.addEventListener('click', () => {
-          vscode.postMessage({ type: 'useModel', modelId: btn.dataset.id });
-          closePicker();
-        });
-      });
-      $pickerList.querySelectorAll('.get-btn').forEach(btn => {
-        btn.addEventListener('click', () => {
-          vscode.postMessage({ type: 'downloadModel', modelId: btn.dataset.id });
-          closePicker();
-        });
-      });
+    function send() {
+      const text = $input.value.trim();
+      if (!text || streaming) return;
+      $input.value = '';
+      $input.style.height = 'auto';
+      vscode.postMessage({ type: 'sendMessage', text, includeContext: $includeCtx.checked });
     }
 
-    function buildItem(model, isInst, anyDl) {
-      const isActive = model.id === activeModelId;
-      const isThis   = currentDl === model.id;
-      let action;
-      if (isActive) {
-        action = '<span class="active-badge">✓ Active</span>';
-      } else if (isInst) {
-        action = '<button class="item-btn use-btn" data-id="' + esc(model.id) + '">Use</button>';
-      } else if (isThis) {
-        action = '<span class="dl-pct-badge">' + dlPercent + '%</span>';
-      } else {
-        action = '<button class="item-btn get-btn"' + (anyDl ? ' disabled' : '') +
-          ' data-id="' + esc(model.id) + '">↓ Get</button>';
-      }
-      return '<div class="picker-item">' +
-        '<span class="item-dot ' + (isInst ? 'installed' : 'available') + '"></span>' +
-        '<span class="item-name" title="' + esc(model.id) + '">' + esc(model.name) + '</span>' +
-        '<span class="item-size">' + esc(model.size) + '</span>' +
-        action + '</div>';
-    }
+    // ── Markdown rendering (code blocks + inline code) ──
+    function renderMarkdown(text) {
+      const div = document.createElement('div');
+      div.className = 'msg-body';
 
-    function isInstalled(id) {
-      const base = id.split(':')[0].toLowerCase();
-      return installed.some(n => n === id.toLowerCase() || n.startsWith(base));
-    }
-
-    function updateStatusDot() {
-      $statusDot.className = '';
-      if (installed.length === 0) {
-        $statusDot.className = 'offline';
-      } else if (isInstalled(activeModelId)) {
-        $statusDot.className = 'ready';
-      } else {
-        $statusDot.className = 'missing';
-      }
-    }
-
-    // ── Markdown renderer ──
-    function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-
-    function renderMarkdown(raw) {
-      let html = '', last = 0, m;
-      const fenceRe = /\`\`\`(\w*)\n?([\s\S]*?)\`\`\`/g;
-      while ((m = fenceRe.exec(raw)) !== null) {
-        html += renderInline(raw.slice(last, m.index));
+      const fenced = /\`\`\`(\\w*)\\n?([\\s\\S]*?)\`\`\`/g;
+      let last = 0;
+      let m;
+      while ((m = fenced.exec(text)) !== null) {
+        if (m.index > last) {
+          div.appendChild(renderInline(text.slice(last, m.index)));
+        }
         const lang = m[1] || 'text';
-        html += '<div class="code-wrap"><div class="code-header"><span>' + esc(lang) +
-          '</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>' +
-          '<pre class="code-block"><code>' + esc(m[2]) + '</code></pre></div>';
-        last = m.index + m[0].length;
+        const code = m[2];
+        const wrap = document.createElement('div');
+        wrap.className = 'code-wrap';
+        wrap.innerHTML =
+          '<div class="code-header">' +
+            '<span>' + esc(lang) + '</span>' +
+            '<button class="copy-btn">Copy</button>' +
+          '</div>' +
+          '<pre class="code-block"><code>' + esc(code) + '</code></pre>';
+        wrap.querySelector('.copy-btn').addEventListener('click', () => {
+          navigator.clipboard.writeText(code).catch(() => {});
+        });
+        div.appendChild(wrap);
+        last = fenced.lastIndex;
       }
-      html += renderInline(raw.slice(last));
-      return html;
+      if (last < text.length) {
+        div.appendChild(renderInline(text.slice(last)));
+      }
+      return div;
     }
 
     function renderInline(text) {
-      return esc(text)
+      const span = document.createElement('span');
+      span.innerHTML = text
+        .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
         .replace(/\`([^\`]+)\`/g, '<code class="inline-code">$1</code>')
-        .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-        .replace(/\*([^*]+)\*/g, '<em>$1</em>');
+        .replace(/\\n/g, '<br>');
+      return span;
     }
 
-    function copyCode(btn) {
-      navigator.clipboard.writeText(btn.closest('.code-wrap').querySelector('pre').textContent).then(() => {
-        const old = btn.textContent; btn.textContent = 'Copied!';
-        setTimeout(() => (btn.textContent = old), 1800);
-      });
+    function esc(s) {
+      return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
     }
 
-    // ── Chat bubbles ──
-    function addBubble(role, content, withCursor) {
-      const el = document.createElement('div');
-      el.className = 'message ' + role;
-      el.innerHTML =
-        '<div class="msg-header"><div class="role-dot"></div>' +
-        '<span class="msg-label">' + (role === 'user' ? 'You' : 'Assistant') + '</span></div>' +
-        '<div class="msg-body">' +
-        (role === 'user' ? renderInline(content) : renderMarkdown(content)) +
-        (withCursor ? '<span class="cursor"></span>' : '') + '</div>';
-      $messages.appendChild(el);
+    function addMessage(role, content) {
+      const div = document.createElement('div');
+      div.className = 'message ' + role;
+      const header = document.createElement('div');
+      header.className = 'msg-header';
+      header.innerHTML = '<div class="role-dot"></div><span class="msg-label">' +
+        (role === 'user' ? 'You' : 'Assistant') + '</span>';
+      div.appendChild(header);
+      div.appendChild(renderMarkdown(content));
+      $messages.appendChild(div);
       $messages.scrollTop = $messages.scrollHeight;
-      return el;
+      return div;
     }
 
-    // ── Send ──
-    function sendMessage() {
-      const text = $input.value.trim();
-      if (!text || streaming) return;
-      $input.value = ''; autoResize();
-      streaming = true; streamText = ''; $streamEl = null;
-      $sendBtn.disabled = true;
-      vscode.postMessage({ type: 'sendMessage', text, includeContext: $includeCtx.checked });
-    }
-    function autoResize() {
-      $input.style.height = 'auto';
-      $input.style.height = Math.min($input.scrollHeight, 120) + 'px';
-    }
-    $input.addEventListener('input', autoResize);
-    $input.addEventListener('keydown', e => {
-      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); sendMessage(); }
-    });
-    $sendBtn.addEventListener('click', sendMessage);
-    $clearBtn.addEventListener('click', () => vscode.postMessage({ type: 'clearChat' }));
-
-    // ── Messages from extension ──
+    // ── Messages from extension host ──
     window.addEventListener('message', ({ data }) => {
       switch (data.type) {
+
+        case 'modelChanged':
+          currentModelId = data.modelId;
+          $modelSelect.value = data.modelId;
+          if (!$modelSelect.value) {
+            // model not yet in list, add it
+            const opt = document.createElement('option');
+            opt.value = data.modelId;
+            opt.textContent = data.short;
+            $modelSelect.appendChild(opt);
+            $modelSelect.value = data.modelId;
+          }
+          break;
+
+        case 'installedModels': {
+          const prev = $modelSelect.value;
+          $modelSelect.innerHTML = '';
+          if (data.models.length === 0) {
+            const opt = document.createElement('option');
+            opt.value = '';
+            opt.textContent = 'No models installed';
+            $modelSelect.appendChild(opt);
+          } else {
+            data.models.forEach(id => {
+              const opt = document.createElement('option');
+              opt.value = id;
+              opt.textContent = id.split('/').pop().replace(/-GGUF$/i, '').slice(0, 36);
+              $modelSelect.appendChild(opt);
+            });
+          }
+          $modelSelect.value = prev || currentModelId;
+          if (!$modelSelect.value && data.models.length) {
+            $modelSelect.value = data.models[0];
+          }
+          break;
+        }
+
+        case 'statusUpdate':
+          $statusDot.className = data.dotState;
+          break;
+
         case 'addMessage':
-          addBubble(data.role, data.content, false);
+          streaming = true;
+          $sendBtn.disabled = true;
+          addMessage(data.role, data.content);
           break;
-        case 'startAssistantMessage':
-          streamText = ''; $streamEl = addBubble('assistant', '', true);
+
+        case 'startAssistantMessage': {
+          const div = document.createElement('div');
+          div.className = 'message assistant';
+          const header = document.createElement('div');
+          header.className = 'msg-header';
+          header.innerHTML = '<div class="role-dot"></div><span class="msg-label">Assistant</span>';
+          div.appendChild(header);
+          $streamEl = document.createElement('div');
+          $streamEl.className = 'msg-body';
+          $streamEl.innerHTML = '<span class="cursor"></span>';
+          div.appendChild($streamEl);
+          $messages.appendChild(div);
+          $messages.scrollTop = $messages.scrollHeight;
+          streamText = '';
           break;
+        }
+
         case 'appendChunk':
           streamText += data.content;
           if ($streamEl) {
-            $streamEl.querySelector('.msg-body').innerHTML = renderMarkdown(streamText) + '<span class="cursor"></span>';
+            const rendered = renderMarkdown(streamText);
+            $streamEl.innerHTML = '';
+            while (rendered.firstChild) $streamEl.appendChild(rendered.firstChild);
+            const cursor = document.createElement('span');
+            cursor.className = 'cursor';
+            $streamEl.appendChild(cursor);
             $messages.scrollTop = $messages.scrollHeight;
           }
           break;
+
         case 'finalizeMessage':
-          if ($streamEl) $streamEl.querySelector('.msg-body').innerHTML = renderMarkdown(streamText);
-          streaming = false; $sendBtn.disabled = false; $streamEl = null;
+          if ($streamEl) {
+            const rendered = renderMarkdown(streamText);
+            $streamEl.innerHTML = '';
+            while (rendered.firstChild) $streamEl.appendChild(rendered.firstChild);
+            $streamEl = null;
+          }
+          streaming = false;
+          $sendBtn.disabled = false;
+          streamText = '';
           break;
+
         case 'error':
           if ($streamEl) {
-            $streamEl.querySelector('.msg-body').innerHTML =
-              '<span style="color:var(--vscode-errorForeground,#f44747)">' + esc(data.content) + '</span>';
-          } else {
-            const el = document.createElement('div');
-            el.style.cssText = 'padding:8px 12px;color:var(--vscode-errorForeground,#f44747);font-size:12px';
-            el.textContent = data.content; $messages.appendChild(el);
+            $streamEl.textContent = 'Error: ' + data.content;
+            $streamEl = null;
           }
-          streaming = false; $sendBtn.disabled = false; $streamEl = null;
+          streaming = false;
+          $sendBtn.disabled = false;
           break;
+
         case 'clearMessages':
           $messages.innerHTML = '';
-          addBubble('assistant', 'Conversation cleared. How can I help?', false);
-          break;
-        case 'setInput':
-          $input.value = data.text; autoResize(); $input.focus();
-          break;
-
-        case 'updateModels':
-          installed = data.installed || [];
-          activeModelId = data.activeModel;
-          updateStatusDot();
-          if ($picker.classList.contains('open')) buildPickerList();
-          break;
-
-        case 'modelChanged':
-          activeModelId = data.modelId;
-          $modelLabel.textContent = data.short;
-          $modelLabel.title = data.modelId;
-          if ($picker.classList.contains('open')) buildPickerList();
-          break;
-
-        case 'downloadProgress':
-          currentDl  = data.modelId;
-          dlPercent  = data.percent;
-          // Show overlay
-          document.getElementById('dl-overlay').classList.remove('hidden');
-          document.getElementById('dl-model').textContent = data.modelId;
-          document.getElementById('dl-fill').style.width  = data.percent + '%';
-          document.getElementById('dl-pct').textContent   = data.percent + '%';
-          document.getElementById('dl-bytes').textContent =
-            data.downloaded && data.total ? data.downloaded + ' / ' + data.total : '';
-          document.getElementById('dl-status-text').textContent = data.status || '';
-          $sendBtn.disabled = true; $input.disabled = true;
-          if ($picker.classList.contains('open')) buildPickerList();
-          break;
-
-        case 'downloadDone':
-          document.getElementById('dl-overlay').classList.add('hidden');
-          currentDl = null; dlPercent = 0;
-          $input.disabled = false;
-          if (!streaming) $sendBtn.disabled = false;
-          if ($picker.classList.contains('open')) buildPickerList();
           break;
       }
     });
